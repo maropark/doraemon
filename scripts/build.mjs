@@ -26,6 +26,7 @@ cleanDir(distFirefoxDir);
 await esbuild.build({
   entryPoints: {
     background: path.join(srcDir, 'extension', 'background.js'),
+    keepalive: path.join(srcDir, 'extension', 'keepalive.js'),
     popup: path.join(srcDir, 'extension', 'popup.js'),
   },
   outdir: distDir,
@@ -48,5 +49,7 @@ copyFile(path.join(srcDir, 'extension', 'popup.html'), path.join(distFirefoxDir,
 copyFile(path.join(srcDir, 'extension', 'icons', 'doraemon.svg'), path.join(distFirefoxDir, 'icons', 'doraemon.svg'));
 copyFile(path.join(distDir, 'background.js'), path.join(distFirefoxDir, 'background.js'));
 copyFile(path.join(distDir, 'background.js.map'), path.join(distFirefoxDir, 'background.js.map'));
+copyFile(path.join(distDir, 'keepalive.js'), path.join(distFirefoxDir, 'keepalive.js'));
+copyFile(path.join(distDir, 'keepalive.js.map'), path.join(distFirefoxDir, 'keepalive.js.map'));
 copyFile(path.join(distDir, 'popup.js'), path.join(distFirefoxDir, 'popup.js'));
 copyFile(path.join(distDir, 'popup.js.map'), path.join(distFirefoxDir, 'popup.js.map'));
