@@ -151,8 +151,20 @@ try {
     print(await fetchRpc('agents.list'));
   } else if (cmd === 'navigate') {
     print(await fetchRpc('tool.call', { tool: 'navigate', args: { url: rest[0] } }));
+  } else if (cmd === 'find') {
+    print(await fetchRpc('tool.call', { tool: 'find', args: { text: rest.join(' ') } }));
   } else if (cmd === 'click') {
     print(await fetchRpc('tool.call', { tool: 'click', args: { selector: rest[0] } }));
+  } else if (cmd === 'click-text') {
+    print(await fetchRpc('tool.call', { tool: 'clickText', args: { text: rest.join(' ') } }));
+  } else if (cmd === 'scroll') {
+    print(await fetchRpc('tool.call', { tool: 'scroll', args: { direction: rest[0] || 'down', amount: rest[1] ? Number(rest[1]) : undefined } }));
+  } else if (cmd === 'youtube-state') {
+    print(await fetchRpc('tool.call', { tool: 'youtubeState', args: {} }));
+  } else if (cmd === 'youtube-open') {
+    print(await fetchRpc('tool.call', { tool: 'youtubeOpen', args: { panel: rest[0] } }));
+  } else if (cmd === 'youtube-transcript') {
+    print(await fetchRpc('tool.call', { tool: 'youtubeTranscript', args: {} }));
   } else if (cmd === 'type') {
     print(await fetchRpc('tool.call', { tool: 'type', args: { selector: rest[0], text: rest.slice(1).join(' ') } }));
   } else if (cmd === 'pressKey') {
@@ -168,7 +180,13 @@ try {
   relay agents
   tool <name> --args='{}'
   navigate <url>
+  find <text>
   click <selector>
+  click-text <text>
+  scroll <direction> [amount]
+  youtube-state
+  youtube-open <transcript|ask>
+  youtube-transcript
   type <selector> <text>
   pressKey <key>
   text [selector]`);

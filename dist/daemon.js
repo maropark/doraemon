@@ -141,7 +141,13 @@ export class DoraemonDaemon {
     if (method === 'tools.list') {
       return [
         'navigate',
+        'find',
         'click',
+        'clickText',
+        'scroll',
+        'youtubeState',
+        'youtubeOpen',
+        'youtubeTranscript',
         'type',
         'pressKey',
         'getContent',
