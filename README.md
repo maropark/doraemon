@@ -31,6 +31,12 @@ node dist/cli.js start
 node dist/cli.js status
 node dist/cli.js tools
 node dist/cli.js navigate "https://example.com"
+node dist/cli.js find "Ask"
+node dist/cli.js click-text "Ask"
+node dist/cli.js scroll down 800
+node dist/cli.js youtube-state
+node dist/cli.js youtube-open transcript
+node dist/cli.js youtube-transcript
 node dist/cli.js click "text=More information"
 node dist/cli.js text "body"
 ```
@@ -40,7 +46,7 @@ node dist/cli.js text "body"
 1. Build:
 
 ```bash
-cd /home/maro/Projects/parchi/doraemon
+cd /home/maro/Projects/doraemon
 npm run build
 ```
 
@@ -99,7 +105,13 @@ curl -s http://127.0.0.1:1969/v1/rpc \
 ## MVP tools
 
 - `navigate`
+- `find`
 - `click`
+- `clickText`
+- `scroll`
+- `youtubeState`
+- `youtubeOpen`
+- `youtubeTranscript`
 - `type`
 - `pressKey`
 - `getContent`

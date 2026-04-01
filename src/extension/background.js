@@ -47,12 +47,22 @@ const loadAgentId = async () => {
   return agentId;
 };
 
+const isControllableUrl = (url) => /^https?:\/\//.test(String(url || ''));
+
 const resolveTargetTabId = async (explicitTabId) => {
   if (typeof explicitTabId === 'number') return explicitTabId;
   const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (activeTab?.id) return activeTab.id;
-  const [firstTab] = await browser.tabs.query({});
-  if (firstTab?.id) return firstTab.id;
+  if (activeTab?.id && isControllableUrl(activeTab.url)) return activeTab.id;
+
+  const tabs = await browser.tabs.query({});
+  const controllableTabs = tabs.filter((tab) => tab.id && isControllableUrl(tab.url));
+  const preferredTab = controllableTabs
+    .sort((a, b) => {
+      const aLast = Number(a.lastAccessed || 0);
+      const bLast = Number(b.lastAccessed || 0);
+      return bLast - aLast;
+    })[0];
+  if (preferredTab?.id) return preferredTab.id;
   throw new Error('No Firefox tab available');
 };
 
@@ -65,6 +75,30 @@ const execInTab = async (tabId, func, args = []) => {
   return results?.[0]?.result;
 };
 
+const INTERACTIVE_SELECTOR = [
+  'button',
+  'a[href]',
+  'input:not([type="hidden"])',
+  'textarea',
+  'select',
+  '[role="button"]',
+  '[contenteditable="true"]',
+  '[tabindex]',
+  'tp-yt-paper-button',
+  'ytd-button-renderer button',
+].join(',');
+
+const YOUTUBE_HELPER_SELECTOR = [
+  '#description button',
+  '#description [role="button"]',
+  '#description-inline-expander button',
+  '#description-inline-expander [role="button"]',
+  'ytd-watch-metadata button',
+  'ytd-watch-metadata [role="button"]',
+  'ytd-engagement-panel-section-list-renderer button',
+  'ytd-engagement-panel-section-list-renderer [role="button"]',
+].join(',');
+
 const resolveElementScript = (selector) => {
   const isTextSelector = typeof selector === 'string' && selector.startsWith('text=');
   if (!isTextSelector) {
@@ -73,6 +107,84 @@ const resolveElementScript = (selector) => {
   const text = selector.slice(5).trim().toLowerCase();
   return `([...document.querySelectorAll('a,button,input,textarea,[role="button"],[contenteditable="true"],*')].find((el)=>((el.innerText||el.value||el.getAttribute('aria-label')||'').trim().toLowerCase().includes(${JSON.stringify(text)}))) || null)`;
 };
+
+const buildDomHelpers = () => ({
+  isVisible(el) {
+    if (!(el instanceof Element)) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  },
+  labelFor(el) {
+    const pieces = [
+      el.innerText,
+      el.textContent,
+      el.value,
+      el.getAttribute('aria-label'),
+      el.getAttribute('title'),
+      el.getAttribute('placeholder'),
+    ]
+      .filter(Boolean)
+      .map((value) => String(value).trim().replace(/\s+/g, ' '));
+    return pieces.join(' ').trim();
+  },
+  selectorFor(el) {
+    if (el.id) return `#${el.id}`;
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute('role');
+    const aria = el.getAttribute('aria-label');
+    if (aria) return `${tag}[aria-label=${JSON.stringify(aria)}]`;
+    if (role) return `${tag}[role=${JSON.stringify(role)}]`;
+    return tag;
+  },
+  scoreFor(label, query, rect, el) {
+    const value = label.toLowerCase();
+    let score = 0;
+    if (value === query) score += 140;
+    else if (value.startsWith(query)) score += 110;
+    else if (value.includes(query)) score += 80;
+
+    const words = query.split(/\s+/).filter(Boolean);
+    const matched = words.filter((word) => value.includes(word)).length;
+    score += matched * 12;
+
+    const aria = String(el.getAttribute('aria-label') || '').toLowerCase();
+    const title = String(el.getAttribute('title') || '').toLowerCase();
+    if (aria === query || title === query) score += 50;
+    if (aria.includes(query) || title.includes(query)) score += 24;
+
+    const inViewport = rect.bottom > 0 && rect.top < window.innerHeight;
+    if (inViewport) score += 40;
+    else score -= Math.min(120, Math.floor(Math.abs(rect.top) / 80) * 8);
+
+    if (rect.top >= 0) score += Math.max(0, 25 - Math.floor(rect.top / 120));
+    if (el.closest('#description, #description-inline-expander')) score += 18;
+    if (el.tagName === 'BUTTON') score += 10;
+
+    return score;
+  },
+  clickLikeHuman(target) {
+    target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    target.focus?.();
+    const rect = target.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const pointed = document.elementFromPoint(centerX, centerY);
+    const clickable = pointed && (pointed === target || target.contains(pointed) || pointed.contains(target)) ? pointed : target;
+    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      clickable.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: centerX,
+        clientY: centerY,
+      }));
+    }
+    if (typeof clickable.click === 'function') clickable.click();
+    return clickable;
+  },
+});
 
 const toolHandlers = {
   async navigate({ url, tabId }) {
@@ -115,6 +227,349 @@ const toolHandlers = {
         return { ok: true };
       },
       [{ selector, elementExpr: resolveElementScript(selector) }],
+    );
+  },
+  async find({ text, limit = 8, tabId }) {
+    const resolvedTabId = await resolveTargetTabId(tabId);
+    return await execInTab(
+      resolvedTabId,
+      ({ text, limit, interactiveSelector }) => {
+        const helpers = ({
+          isVisible(el) {
+            if (!(el instanceof Element)) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          },
+          labelFor(el) {
+            const pieces = [
+              el.innerText,
+              el.textContent,
+              el.value,
+              el.getAttribute('aria-label'),
+              el.getAttribute('title'),
+              el.getAttribute('placeholder'),
+            ]
+              .filter(Boolean)
+              .map((value) => String(value).trim().replace(/\s+/g, ' '));
+            return pieces.join(' ').trim();
+          },
+          selectorFor(el) {
+            if (el.id) return `#${el.id}`;
+            const tag = el.tagName.toLowerCase();
+            const role = el.getAttribute('role');
+            const aria = el.getAttribute('aria-label');
+            if (aria) return `${tag}[aria-label=${JSON.stringify(aria)}]`;
+            if (role) return `${tag}[role=${JSON.stringify(role)}]`;
+            return tag;
+          },
+          scoreFor(label, query, rect, el) {
+            const value = label.toLowerCase();
+            let score = 0;
+            if (value === query) score += 140;
+            else if (value.startsWith(query)) score += 110;
+            else if (value.includes(query)) score += 80;
+            const words = query.split(/\s+/).filter(Boolean);
+            const matched = words.filter((word) => value.includes(word)).length;
+            score += matched * 12;
+            const aria = String(el.getAttribute('aria-label') || '').toLowerCase();
+            const title = String(el.getAttribute('title') || '').toLowerCase();
+            if (aria === query || title === query) score += 50;
+            if (aria.includes(query) || title.includes(query)) score += 24;
+            const inViewport = rect.bottom > 0 && rect.top < window.innerHeight;
+            if (inViewport) score += 40;
+            else score -= Math.min(120, Math.floor(Math.abs(rect.top) / 80) * 8);
+            if (rect.top >= 0) score += Math.max(0, 25 - Math.floor(rect.top / 120));
+            if (el.closest('#description, #description-inline-expander')) score += 18;
+            if (el.tagName === 'BUTTON') score += 10;
+            return score;
+          },
+        });
+        const query = String(text || '').trim().toLowerCase();
+        if (!query) throw new Error('Missing text query');
+
+        return [...document.querySelectorAll(interactiveSelector)]
+          .filter(helpers.isVisible)
+          .map((el) => {
+            const label = helpers.labelFor(el);
+            const rect = el.getBoundingClientRect();
+            return {
+              tag: el.tagName.toLowerCase(),
+              text: label.slice(0, 160),
+              ariaLabel: el.getAttribute('aria-label'),
+              title: el.getAttribute('title'),
+              selector: helpers.selectorFor(el),
+              score: helpers.scoreFor(label, query, rect, el),
+              rect: {
+                x: Math.round(rect.x),
+                y: Math.round(rect.y),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+              },
+            };
+          })
+          .filter((candidate) => candidate.score > 0)
+          .sort((a, b) => b.score - a.score || a.rect.y - b.rect.y)
+          .slice(0, Math.max(1, Math.min(Number(limit) || 8, 20)));
+      },
+      [{ text, limit, interactiveSelector: INTERACTIVE_SELECTOR }],
+    );
+  },
+  async clickText({ text, limit = 24, tabId }) {
+    const resolvedTabId = await resolveTargetTabId(tabId);
+    return await execInTab(
+      resolvedTabId,
+      ({ text, limit, interactiveSelector }) => {
+        const helpers = ({
+          isVisible(el) {
+            if (!(el instanceof Element)) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          },
+          labelFor(el) {
+            const pieces = [
+              el.innerText,
+              el.textContent,
+              el.value,
+              el.getAttribute('aria-label'),
+              el.getAttribute('title'),
+              el.getAttribute('placeholder'),
+            ]
+              .filter(Boolean)
+              .map((value) => String(value).trim().replace(/\s+/g, ' '));
+            return pieces.join(' ').trim();
+          },
+          scoreFor(label, query, rect, el) {
+            const value = label.toLowerCase();
+            let score = 0;
+            if (value === query) score += 140;
+            else if (value.startsWith(query)) score += 110;
+            else if (value.includes(query)) score += 80;
+            const words = query.split(/\s+/).filter(Boolean);
+            const matched = words.filter((word) => value.includes(word)).length;
+            score += matched * 12;
+            const aria = String(el.getAttribute('aria-label') || '').toLowerCase();
+            const title = String(el.getAttribute('title') || '').toLowerCase();
+            if (aria === query || title === query) score += 50;
+            if (aria.includes(query) || title.includes(query)) score += 24;
+            const inViewport = rect.bottom > 0 && rect.top < window.innerHeight;
+            if (inViewport) score += 40;
+            else score -= Math.min(120, Math.floor(Math.abs(rect.top) / 80) * 8);
+            if (rect.top >= 0) score += Math.max(0, 25 - Math.floor(rect.top / 120));
+            if (el.closest('#description, #description-inline-expander')) score += 18;
+            if (el.tagName === 'BUTTON') score += 10;
+            return score;
+          },
+          clickLikeHuman(target) {
+            target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            target.focus?.();
+            const rect = target.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            const pointed = document.elementFromPoint(centerX, centerY);
+            const clickable = pointed && (pointed === target || target.contains(pointed) || pointed.contains(target)) ? pointed : target;
+            for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+              clickable.dispatchEvent(new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                clientX: centerX,
+                clientY: centerY,
+              }));
+            }
+            if (typeof clickable.click === 'function') clickable.click();
+            return clickable;
+          },
+        });
+        const query = String(text || '').trim().toLowerCase();
+        if (!query) throw new Error('Missing text query');
+
+        const candidates = [...document.querySelectorAll(interactiveSelector)]
+          .filter(helpers.isVisible)
+          .map((el) => {
+            const label = helpers.labelFor(el);
+            return { el, label, score: helpers.scoreFor(label, query, el.getBoundingClientRect(), el) };
+          })
+          .filter((candidate) => candidate.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, Math.max(1, Math.min(Number(limit) || 24, 50)));
+
+        const target = candidates[0]?.el;
+        if (!target) throw new Error(`No visible interactive element matched "${text}"`);
+
+        helpers.clickLikeHuman(target);
+
+        return {
+          ok: true,
+          text: helpers.labelFor(target).slice(0, 160),
+          tag: target.tagName.toLowerCase(),
+        };
+      },
+      [{ text, limit, interactiveSelector: INTERACTIVE_SELECTOR }],
+    );
+  },
+  async scroll({ direction = 'down', amount = 800, tabId }) {
+    const resolvedTabId = await resolveTargetTabId(tabId);
+    return await execInTab(
+      resolvedTabId,
+      ({ direction, amount }) => {
+        const delta = Math.max(0, Number(amount) || 800);
+        if (direction === 'top') {
+          window.scrollTo({ top: 0, behavior: 'instant' });
+        } else if (direction === 'bottom') {
+          window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+        } else if (direction === 'up') {
+          window.scrollBy({ top: -delta, behavior: 'instant' });
+        } else {
+          window.scrollBy({ top: delta, behavior: 'instant' });
+        }
+        return {
+          ok: true,
+          direction,
+          amount: delta,
+          scrollY: Math.round(window.scrollY),
+        };
+      },
+      [{ direction, amount }],
+    );
+  },
+  async youtubeState({ tabId }) {
+    const resolvedTabId = await resolveTargetTabId(tabId);
+    return await execInTab(
+      resolvedTabId,
+      ({ helperSelector }) => {
+        const helpers = ({
+          isVisible(el) {
+            if (!(el instanceof Element)) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          },
+          labelFor(el) {
+            const pieces = [
+              el.innerText,
+              el.textContent,
+              el.value,
+              el.getAttribute('aria-label'),
+              el.getAttribute('title'),
+              el.getAttribute('placeholder'),
+            ]
+              .filter(Boolean)
+              .map((value) => String(value).trim().replace(/\s+/g, ' '));
+            return pieces.join(' ').trim();
+          },
+        });
+        const candidates = [...document.querySelectorAll(helperSelector)]
+          .filter(helpers.isVisible)
+          .map((el) => ({
+            text: helpers.labelFor(el).slice(0, 120),
+            ariaLabel: el.getAttribute('aria-label'),
+            tag: el.tagName.toLowerCase(),
+            y: Math.round(el.getBoundingClientRect().y),
+          }));
+        const hasLabel = (needle) => candidates.some((candidate) => {
+          const haystack = `${candidate.text} ${candidate.ariaLabel || ''}`.toLowerCase();
+          return haystack.includes(needle);
+        });
+        return {
+          ok: true,
+          url: location.href,
+          title: document.title,
+          inDescription: hasLabel('show transcript') || hasLabel('ask') || hasLabel('ask questions'),
+          transcriptOpen: Boolean(document.querySelector('textarea[aria-label="Search transcript"], ytd-transcript-search-panel-renderer')),
+          askOpen: Boolean(document.body.innerText.includes('Ask about this video') || document.body.innerText.includes('Made with Gemini')),
+          visibleButtons: candidates.filter((candidate) => candidate.text || candidate.ariaLabel).slice(0, 40),
+        };
+      },
+      [{ helperSelector: YOUTUBE_HELPER_SELECTOR }],
+    );
+  },
+  async youtubeOpen({ panel, tabId }) {
+    const resolvedTabId = await resolveTargetTabId(tabId);
+    return await execInTab(
+      resolvedTabId,
+      ({ panel, helperSelector }) => {
+        const helpers = ({
+          isVisible(el) {
+            if (!(el instanceof Element)) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          },
+          labelFor(el) {
+            const pieces = [
+              el.innerText,
+              el.textContent,
+              el.value,
+              el.getAttribute('aria-label'),
+              el.getAttribute('title'),
+              el.getAttribute('placeholder'),
+            ]
+              .filter(Boolean)
+              .map((value) => String(value).trim().replace(/\s+/g, ' '));
+            return pieces.join(' ').trim();
+          },
+          clickLikeHuman(target) {
+            target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            target.focus?.();
+            const rect = target.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            const pointed = document.elementFromPoint(centerX, centerY);
+            const clickable = pointed && (pointed === target || target.contains(pointed) || pointed.contains(target)) ? pointed : target;
+            for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+              clickable.dispatchEvent(new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                clientX: centerX,
+                clientY: centerY,
+              }));
+            }
+            if (typeof clickable.click === 'function') clickable.click();
+          },
+        });
+        const targetLabels = panel === 'transcript'
+          ? ['show transcript', 'transcript']
+          : ['ask questions', 'ask'];
+        const candidates = [...document.querySelectorAll(helperSelector)]
+          .filter(helpers.isVisible)
+          .map((el) => ({ el, label: helpers.labelFor(el).toLowerCase() }))
+          .filter((candidate) => targetLabels.some((label) => candidate.label.includes(label)))
+          .sort((a, b) => a.el.getBoundingClientRect().y - b.el.getBoundingClientRect().y);
+        const target = candidates[0]?.el;
+        if (!target) throw new Error(`Could not find YouTube ${panel} control`);
+        helpers.clickLikeHuman(target);
+        return {
+          ok: true,
+          panel,
+          text: helpers.labelFor(target).slice(0, 120),
+        };
+      },
+      [{ panel, helperSelector: YOUTUBE_HELPER_SELECTOR }],
+    );
+  },
+  async youtubeTranscript({ tabId }) {
+    const resolvedTabId = await resolveTargetTabId(tabId);
+    return await execInTab(
+      resolvedTabId,
+      () => {
+        const transcriptRoot =
+          document.querySelector('ytd-transcript-segment-list-renderer') ||
+          document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"]') ||
+          document.body;
+        const transcriptText = transcriptRoot.innerText || '';
+        return {
+          ok: transcriptText.includes('Search transcript') || transcriptText.includes('Transcript'),
+          text: transcriptText,
+        };
+      },
+      [],
     );
   },
   async type({ selector, text, tabId }) {
