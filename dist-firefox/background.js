@@ -3,12 +3,21 @@ var DEFAULT_RELAY_URL = "http://127.0.0.1:1969";
 var DEFAULT_RETRY_MS = 3e3;
 var HANDSHAKE_TIMEOUT_MS = 4e3;
 var AGENT_ID_KEY = "agentId";
+var KEEPALIVE_PORT_NAME = "doraemon.keepalive";
 var ws = null;
 var retryTimer = null;
 var handshakeTimer = null;
 var helloRequestId = null;
 var connectInFlight = false;
-var currentSettings = { relayUrl: DEFAULT_RELAY_URL, relayToken: "", relayConnected: false, relayLastError: "" };
+var currentSettings = {
+  relayUrl: DEFAULT_RELAY_URL,
+  relayToken: "",
+  relayConnected: false,
+  relayLastError: "",
+  relayLastEvent: "booting",
+  keepalivePorts: 0
+};
+var keepalivePorts = /* @__PURE__ */ new Set();
 var delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 var getStorage = async (keys) => await browser.storage.local.get(keys);
 var setStorage = async (patch) => await browser.storage.local.set(patch);
@@ -179,12 +188,14 @@ var clearRetry = () => {
     retryTimer = null;
   }
 };
-var applyRelayState = async ({ connected, lastError = "", relayUrl, relayToken }) => {
+var applyRelayState = async ({ connected, lastError = "", relayUrl, relayToken, lastEvent, keepaliveCount }) => {
   currentSettings = {
     relayUrl: relayUrl ?? currentSettings.relayUrl,
     relayToken: relayToken ?? currentSettings.relayToken,
     relayConnected: connected,
-    relayLastError: lastError
+    relayLastError: lastError,
+    relayLastEvent: lastEvent ?? currentSettings.relayLastEvent,
+    keepalivePorts: keepaliveCount ?? currentSettings.keepalivePorts
   };
   await setStorage(currentSettings);
 };
@@ -193,19 +204,19 @@ var autoPair = async () => {
   const configuredUrl = normalizeRelayUrl(saved.relayUrl || DEFAULT_RELAY_URL) || DEFAULT_RELAY_URL;
   const configuredToken = String(saved.relayToken || "").trim();
   if (configuredToken) {
-    await applyRelayState({ connected: false, relayUrl: configuredUrl, relayToken: configuredToken });
+    await applyRelayState({ connected: false, relayUrl: configuredUrl, relayToken: configuredToken, lastEvent: "paired" });
     return;
   }
   try {
     const res = await fetch(`${configuredUrl}/v1/pair`, { cache: "no-store" });
     const payload = await res.json();
     if (payload?.token) {
-      await applyRelayState({ connected: false, relayUrl: configuredUrl, relayToken: String(payload.token) });
+      await applyRelayState({ connected: false, relayUrl: configuredUrl, relayToken: String(payload.token), lastEvent: "paired" });
       return;
     }
   } catch {
   }
-  await applyRelayState({ connected: false, relayUrl: configuredUrl, relayToken: "" });
+  await applyRelayState({ connected: false, relayUrl: configuredUrl, relayToken: "", lastEvent: "pair-missing-token" });
 };
 var connectRelay = async () => {
   if (connectInFlight) return;
@@ -215,7 +226,7 @@ var connectRelay = async () => {
   try {
     await autoPair();
     if (!currentSettings.relayToken) {
-      await applyRelayState({ connected: false, lastError: "No relay token yet" });
+      await applyRelayState({ connected: false, lastError: "No relay token yet", lastEvent: "waiting-for-token" });
       scheduleRetry();
       return;
     }
@@ -223,14 +234,14 @@ var connectRelay = async () => {
     try {
       ws = new WebSocket(wsUrl);
     } catch (error) {
-      await applyRelayState({ connected: false, lastError: error instanceof Error ? error.message : "WebSocket failed" });
+      await applyRelayState({ connected: false, lastError: error instanceof Error ? error.message : "WebSocket failed", lastEvent: "ws-create-failed" });
       scheduleRetry();
       return;
     }
     ws.onopen = async () => {
       const agentId = await loadAgentId();
       helloRequestId = `hello-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      await applyRelayState({ connected: false, lastError: "Waiting for relay handshake..." });
+      await applyRelayState({ connected: false, lastError: "Waiting for relay handshake...", lastEvent: "ws-open" });
       ws.send(JSON.stringify({
         jsonrpc: "2.0",
         id: helloRequestId,
@@ -245,7 +256,7 @@ var connectRelay = async () => {
       }));
       handshakeTimer = setTimeout(() => {
         if (ws?.readyState === WebSocket.OPEN && helloRequestId) {
-          void applyRelayState({ connected: false, lastError: "Relay handshake timed out" });
+          void applyRelayState({ connected: false, lastError: "Relay handshake timed out", lastEvent: "handshake-timeout" });
           ws.close();
         }
       }, HANDSHAKE_TIMEOUT_MS);
@@ -253,19 +264,19 @@ var connectRelay = async () => {
     ws.onclose = async () => {
       clearHandshake();
       ws = null;
-      await applyRelayState({ connected: false, lastError: "Disconnected" });
+      await applyRelayState({ connected: false, lastError: "Disconnected", lastEvent: "ws-closed" });
       scheduleRetry();
     };
     ws.onerror = async () => {
       if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
-        await applyRelayState({ connected: false, lastError: "WebSocket error" });
+        await applyRelayState({ connected: false, lastError: "WebSocket error", lastEvent: "ws-error-closed" });
         return;
       }
       if (helloRequestId) {
-        await applyRelayState({ connected: false, lastError: "WebSocket error during handshake" });
+        await applyRelayState({ connected: false, lastError: "WebSocket error during handshake", lastEvent: "ws-error-handshake" });
         return;
       }
-      await applyRelayState({ connected: true, lastError: "WebSocket warning" });
+      await applyRelayState({ connected: true, lastError: "WebSocket warning", lastEvent: "ws-warning" });
     };
     ws.onmessage = async (event2) => {
       let message;
@@ -277,7 +288,7 @@ var connectRelay = async () => {
       if (message?.id && helloRequestId && message.id === helloRequestId) {
         clearHandshake();
         clearRetry();
-        await applyRelayState({ connected: true, lastError: "" });
+        await applyRelayState({ connected: true, lastError: "", lastEvent: "connected" });
         return;
       }
       if (message?.method !== "tool.call") return;
@@ -301,6 +312,25 @@ var connectRelay = async () => {
     connectInFlight = false;
   }
 };
+browser.runtime.onConnect.addListener((port) => {
+  if (port.name !== KEEPALIVE_PORT_NAME) return;
+  keepalivePorts.add(port);
+  void applyRelayState({
+    connected: currentSettings.relayConnected,
+    lastError: currentSettings.relayLastError,
+    lastEvent: "keepalive-port-open",
+    keepaliveCount: keepalivePorts.size
+  });
+  port.onDisconnect.addListener(() => {
+    keepalivePorts.delete(port);
+    void applyRelayState({
+      connected: currentSettings.relayConnected,
+      lastError: currentSettings.relayLastError,
+      lastEvent: "keepalive-port-closed",
+      keepaliveCount: keepalivePorts.size
+    });
+  });
+});
 browser.runtime.onInstalled.addListener(() => void connectRelay());
 browser.runtime.onStartup.addListener(() => void connectRelay());
 browser.storage.onChanged.addListener((changes, area) => {

@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/extension/keepalive.js"],
+  "sourcesContent": ["const KEEPALIVE_PORT_NAME = 'doraemon.keepalive';\nconst RECONNECT_MS = 1000;\n\nlet port = null;\nlet reconnectTimer = null;\n\nconst clearReconnect = () => {\n  if (reconnectTimer) {\n    clearTimeout(reconnectTimer);\n    reconnectTimer = null;\n  }\n};\n\nconst connect = () => {\n  clearReconnect();\n  try {\n    port = browser.runtime.connect({ name: KEEPALIVE_PORT_NAME });\n  } catch {\n    reconnectTimer = setTimeout(connect, RECONNECT_MS);\n    return;\n  }\n  port.onDisconnect.addListener(() => {\n    port = null;\n    reconnectTimer = setTimeout(connect, RECONNECT_MS);\n  });\n};\n\nconnect();\n"],
+  "mappings": ";AAAA,IAAM,sBAAsB;AAC5B,IAAM,eAAe;AAErB,IAAI,OAAO;AACX,IAAI,iBAAiB;AAErB,IAAM,iBAAiB,MAAM;AAC3B,MAAI,gBAAgB;AAClB,iBAAa,cAAc;AAC3B,qBAAiB;AAAA,EACnB;AACF;AAEA,IAAM,UAAU,MAAM;AACpB,iBAAe;AACf,MAAI;AACF,WAAO,QAAQ,QAAQ,QAAQ,EAAE,MAAM,oBAAoB,CAAC;AAAA,EAC9D,QAAQ;AACN,qBAAiB,WAAW,SAAS,YAAY;AACjD;AAAA,EACF;AACA,OAAK,aAAa,YAAY,MAAM;AAClC,WAAO;AACP,qBAAiB,WAAW,SAAS,YAAY;AAAA,EACnD,CAAC;AACH;AAEA,QAAQ;",
+  "names": []
+}
