@@ -1,5 +1,5 @@
 // src/extension/background.js
-var DEFAULT_RELAY_URL = "http://127.0.0.1:19699";
+var DEFAULT_RELAY_URL = "http://127.0.0.1:1969";
 var DEFAULT_RETRY_MS = 3e3;
 var HANDSHAKE_TIMEOUT_MS = 4e3;
 var AGENT_ID_KEY = "agentId";

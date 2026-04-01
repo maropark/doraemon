@@ -1,4 +1,4 @@
-const DEFAULT_RELAY_URL = 'http://127.0.0.1:19699';
+const DEFAULT_RELAY_URL = 'http://127.0.0.1:1969';
 const DEFAULT_RETRY_MS = 3000;
 const HANDSHAKE_TIMEOUT_MS = 4000;
 const AGENT_ID_KEY = 'agentId';

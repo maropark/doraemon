@@ -183,7 +183,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   );
   const daemon = new DoraemonDaemon({
     host: args.host || '127.0.0.1',
-    port: Number(args.port || 19699),
+    port: Number(args.port || 1969),
     token: args.token || '',
   });
   if (!daemon.token) {
