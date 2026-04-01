@@ -1,0 +1,24 @@
+{
+  "name": "doraemon",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Firefox-first CLI browser control MVP",
+  "bin": {
+    "doraemon": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:firefox": "node scripts/build.mjs",
+    "start": "node dist/cli.js start",
+    "status": "node dist/cli.js status",
+    "stop": "node dist/cli.js stop",
+    "tools": "node dist/cli.js tools"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.11"
+  }
+}

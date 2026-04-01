@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Doraemon",
+  "version": "0.1.0",
+  "description": "Firefox-first CLI browser control MVP",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{9cc7e95f-03d5-49be-a4c7-1f52b8183d7f}",
+      "strict_min_version": "128.0"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "type": "module"
+  },
+  "action": {
+    "default_icon": {
+      "128": "icons/doraemon.svg"
+    },
+    "default_title": "Doraemon",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "128": "icons/doraemon.svg"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http: https: ws: wss: data: blob:"
+  }
+}
