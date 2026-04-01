@@ -9,7 +9,7 @@ const STATE_PATH = path.join(STATE_DIR, 'relay.json');
 const PID_PATH = path.join(STATE_DIR, 'relay.pid');
 const LOG_PATH = path.join(STATE_DIR, 'relay.log');
 const DEFAULT_HOST = '127.0.0.1';
-const DEFAULT_PORT = 19699;
+const DEFAULT_PORT = 1969;
 
 const ensureStateDir = () => fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
 const readJson = (target) => {
@@ -80,7 +80,7 @@ const startManagedDaemon = async () => {
   const existing = readJson(STATE_PATH) || {};
   const host = existing.host || DEFAULT_HOST;
   const port =
-    existing.port === 17373 && host === DEFAULT_HOST
+    (existing.port === 17373 || existing.port === 19699) && host === DEFAULT_HOST
       ? DEFAULT_PORT
       : existing.port || DEFAULT_PORT;
   const token = existing.token || crypto.randomBytes(32).toString('hex');

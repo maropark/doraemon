@@ -9,7 +9,7 @@ const render = async () => {
   badge.textContent = connected ? 'Connected' : 'Disconnected';
   badge.className = `badge ${connected ? 'connected' : 'disconnected'}`;
   errorText.textContent = state.relayLastError || 'none';
-  relayUrl.textContent = state.relayUrl || 'http://127.0.0.1:19699';
+  relayUrl.textContent = state.relayUrl || 'http://127.0.0.1:1969';
 };
 
 retryBtn.addEventListener('click', async () => {

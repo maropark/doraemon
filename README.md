@@ -14,7 +14,7 @@ No LLM provider setup. No sidepanel chat. No account model. Just browser control
 
 ## What it includes
 
-- Local managed relay on `127.0.0.1:19699`
+- Local managed relay on `127.0.0.1:1969`
 - Firefox extension that auto-pairs with the local relay and only reports connected after agent registration succeeds
 - JSON-RPC HTTP API for CLI-agnostic control
 - Small CLI wrapper for convenience
@@ -90,7 +90,7 @@ JSON-RPC methods:
 Example:
 
 ```bash
-curl -s http://127.0.0.1:19699/v1/rpc \
+curl -s http://127.0.0.1:1969/v1/rpc \
   -H "Authorization: Bearer $(jq -r .token ~/.doraemon/relay.json)" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":"1","method":"tool.call","params":{"tool":"navigate","args":{"url":"https://example.com"}}}'
