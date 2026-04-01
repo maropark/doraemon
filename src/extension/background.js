@@ -7,6 +7,7 @@ let ws = null;
 let retryTimer = null;
 let handshakeTimer = null;
 let helloRequestId = null;
+let connectInFlight = false;
 let currentSettings = { relayUrl: DEFAULT_RELAY_URL, relayToken: '', relayConnected: false, relayLastError: '' };
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -183,6 +184,13 @@ const clearHandshake = () => {
   helloRequestId = null;
 };
 
+const clearRetry = () => {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+};
+
 const applyRelayState = async ({ connected, lastError = '', relayUrl, relayToken }) => {
   currentSettings = {
     relayUrl: relayUrl ?? currentSettings.relayUrl,
@@ -213,82 +221,98 @@ const autoPair = async () => {
 };
 
 const connectRelay = async () => {
+  if (connectInFlight) return;
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  await autoPair();
-  if (!currentSettings.relayToken) {
-    await applyRelayState({ connected: false, lastError: 'No relay token yet' });
-    scheduleRetry();
-    return;
-  }
-  const wsUrl = currentSettings.relayUrl.replace(/^http/, 'ws') + `/v1/extension?token=${encodeURIComponent(currentSettings.relayToken)}`;
+  connectInFlight = true;
+  clearRetry();
   try {
-    ws = new WebSocket(wsUrl);
-  } catch (error) {
-    await applyRelayState({ connected: false, lastError: error instanceof Error ? error.message : 'WebSocket failed' });
-    scheduleRetry();
-    return;
-  }
-  ws.onopen = async () => {
-    const agentId = await loadAgentId();
-    helloRequestId = `hello-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await applyRelayState({ connected: false, lastError: 'Waiting for relay handshake...' });
-    ws.send(JSON.stringify({
-      jsonrpc: '2.0',
-      id: helloRequestId,
-      method: 'agent.hello',
-      params: {
-        agentId,
-        name: 'doraemon-firefox',
-        version: __DORAEMON_VERSION__,
-        browser: 'firefox',
-        capabilities: { tools: true }
-      }
-    }));
-    handshakeTimer = setTimeout(() => {
-      if (ws?.readyState === WebSocket.OPEN && helloRequestId) {
-        void applyRelayState({ connected: false, lastError: 'Relay handshake timed out' });
-        ws.close();
-      }
-    }, HANDSHAKE_TIMEOUT_MS);
-  };
-  ws.onclose = async () => {
-    clearHandshake();
-    ws = null;
-    await applyRelayState({ connected: false, lastError: 'Disconnected' });
-    scheduleRetry();
-  };
-  ws.onerror = async () => {
-    await applyRelayState({ connected: false, lastError: 'WebSocket error' });
-  };
-  ws.onmessage = async (event) => {
-    let message;
-    try {
-      message = JSON.parse(String(event.data || ''));
-    } catch {
+    await autoPair();
+    if (!currentSettings.relayToken) {
+      await applyRelayState({ connected: false, lastError: 'No relay token yet' });
+      scheduleRetry();
       return;
     }
-    if (message?.id && helloRequestId && message.id === helloRequestId) {
-      clearHandshake();
-      await applyRelayState({ connected: true, lastError: '' });
-      return;
-    }
-    if (message?.method !== 'tool.call') return;
-    const id = message.id;
+    const wsUrl = currentSettings.relayUrl.replace(/^http/, 'ws') + `/v1/extension?token=${encodeURIComponent(currentSettings.relayToken)}`;
     try {
-      const tool = String(message.params?.tool || '');
-      const args = message.params?.args || {};
-      const handler = toolHandlers[tool];
-      if (!handler) throw new Error(`Unknown tool: ${tool}`);
-      const result = await handler(args);
-      ws?.send(JSON.stringify({ jsonrpc: '2.0', id, result }));
+      ws = new WebSocket(wsUrl);
     } catch (error) {
-      ws?.send(JSON.stringify({
-        jsonrpc: '2.0',
-        id,
-        error: { code: -32000, message: error instanceof Error ? error.message : String(error ?? 'error') },
-      }));
+      await applyRelayState({ connected: false, lastError: error instanceof Error ? error.message : 'WebSocket failed' });
+      scheduleRetry();
+      return;
     }
-  };
+    ws.onopen = async () => {
+      const agentId = await loadAgentId();
+      helloRequestId = `hello-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await applyRelayState({ connected: false, lastError: 'Waiting for relay handshake...' });
+      ws.send(JSON.stringify({
+        jsonrpc: '2.0',
+        id: helloRequestId,
+        method: 'agent.hello',
+        params: {
+          agentId,
+          name: 'doraemon-firefox',
+          version: __DORAEMON_VERSION__,
+          browser: 'firefox',
+          capabilities: { tools: true }
+        }
+      }));
+      handshakeTimer = setTimeout(() => {
+        if (ws?.readyState === WebSocket.OPEN && helloRequestId) {
+          void applyRelayState({ connected: false, lastError: 'Relay handshake timed out' });
+          ws.close();
+        }
+      }, HANDSHAKE_TIMEOUT_MS);
+    };
+    ws.onclose = async () => {
+      clearHandshake();
+      ws = null;
+      await applyRelayState({ connected: false, lastError: 'Disconnected' });
+      scheduleRetry();
+    };
+    ws.onerror = async () => {
+      if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+        await applyRelayState({ connected: false, lastError: 'WebSocket error' });
+        return;
+      }
+      if (helloRequestId) {
+        await applyRelayState({ connected: false, lastError: 'WebSocket error during handshake' });
+        return;
+      }
+      await applyRelayState({ connected: true, lastError: 'WebSocket warning' });
+    };
+    ws.onmessage = async (event) => {
+      let message;
+      try {
+        message = JSON.parse(String(event.data || ''));
+      } catch {
+        return;
+      }
+      if (message?.id && helloRequestId && message.id === helloRequestId) {
+        clearHandshake();
+        clearRetry();
+        await applyRelayState({ connected: true, lastError: '' });
+        return;
+      }
+      if (message?.method !== 'tool.call') return;
+      const id = message.id;
+      try {
+        const tool = String(message.params?.tool || '');
+        const args = message.params?.args || {};
+        const handler = toolHandlers[tool];
+        if (!handler) throw new Error(`Unknown tool: ${tool}`);
+        const result = await handler(args);
+        ws?.send(JSON.stringify({ jsonrpc: '2.0', id, result }));
+      } catch (error) {
+        ws?.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32000, message: error instanceof Error ? error.message : String(error ?? 'error') },
+        }));
+      }
+    };
+  } finally {
+    connectInFlight = false;
+  }
 };
 
 browser.runtime.onInstalled.addListener(() => void connectRelay());
