@@ -44,6 +44,7 @@ export class DoraemonDaemon {
 
   attachAgent(ws) {
     let agentId = null;
+    console.log('[doraemon] extension connected');
     ws.on('message', (data) => {
       let message;
       try {
@@ -59,6 +60,7 @@ export class DoraemonDaemon {
           pending: new Map(),
         });
         if (!this.defaultAgentId) this.defaultAgentId = agentId;
+        console.log(`[doraemon] agent registered ${agentId}`);
         if (message.id) {
           ws.send(JSON.stringify({
             jsonrpc: '2.0',
@@ -85,6 +87,7 @@ export class DoraemonDaemon {
     });
 
     ws.on('close', () => {
+      console.log(`[doraemon] extension disconnected${agentId ? ` ${agentId}` : ''}`);
       if (!agentId) return;
       const existing = this.agents.get(agentId);
       if (!existing || existing.ws !== ws) return;
