@@ -21,10 +21,9 @@ No LLM provider setup. No sidepanel chat. No account model. Just browser control
 
 ## Commands
 
-From a standalone checkout:
+After cloning this repository and entering its root directory:
 
 ```bash
-cd /home/maro/Projects/doraemon
 npm install
 npm run build
 node dist/cli.js start
@@ -43,40 +42,67 @@ node dist/cli.js text "body"
 
 ## Firefox setup
 
-1. Build:
+1. Build the extension:
 
 ```bash
-cd /home/maro/Projects/doraemon
 npm run build
 ```
 
-2. Start relay:
+2. Start the relay:
 
 ```bash
 node dist/cli.js start
 ```
 
-Use:
-
-```bash
-node dist/cli.js start
-```
-
-3. Open Firefox:
-
-```text
-about:debugging#/runtime/this-firefox
-```
+3. Open Firefox to `about:debugging#/runtime/this-firefox`
 
 4. Click `Load Temporary Add-on`
 
-5. Select:
-
-```text
-/home/maro/Projects/doraemon/dist-firefox/manifest.json
-```
+5. Select the manifest at `dist-firefox/manifest.json` from the repository root
 
 6. The extension will retry pairing automatically. Open the Doraemon toolbar button if you want to inspect relay state.
+
+## Health check
+
+Verify the Doraemon agent connection is healthy at three levels:
+
+### Daemon alive
+
+Check that the relay server is running:
+
+```bash
+curl -s http://127.0.0.1:1969/healthz
+# → {"ok":true}
+```
+
+### Extension paired
+
+Check that the Firefox extension has connected and registered:
+
+```bash
+curl -s http://127.0.0.1:1969/v1/pair
+# → {"ok":true,"paired":true,"token":"..."}
+```
+
+If `paired` is `false`, the extension hasn't connected yet. Check the Firefox Doraemon toolbar button for error details, or verify the extension is loaded in `about:debugging`.
+
+### Full relay status
+
+Get daemon PID, relay health, and connected agent count via the CLI:
+
+```bash
+node dist/cli.js status
+```
+
+Returns:
+```json
+{
+  "configured": true,
+  "daemon": { "ok": true, "now": "..." },
+  "pid": 12345,
+  "relay": { "ok": true, "now": "...", "agents": 1, "defaultAgentId": "..." }
+}
+```
 
 ## CLI-agnostic API
 
