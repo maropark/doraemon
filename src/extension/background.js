@@ -194,16 +194,27 @@ const toolHandlers = {
   },
   async getContent({ type = 'text', selector, tabId }) {
     const resolvedTabId = await resolveTargetTabId(tabId);
+    const MAX_CHARS = 50_000;
     return await execInTab(
       resolvedTabId,
-      ({ type, selector, elementExpr }) => {
+      ({ type, selector, elementExpr, maxChars }) => {
+        // Guard: unbounded body reads on YouTube crash the extension messaging channel.
+        // YouTube's DOM is 500KB+ of innerText; serializing it through scripting.executeScript
+        // overflows Firefox's IPC buffer and disconnects the agent.
+        // Use youtube-state for structured YouTube page info instead.
+        if (!selector && type === 'text' && location.hostname.includes('youtube.com')) {
+          throw new Error(
+            'Blocked: document.body.innerText on YouTube crashes the extension. ' +
+            'Use youtube-state for structured page info instead.',
+          );
+        }
         const el = selector ? eval(elementExpr) : document.body;
         if (type === 'title') return document.title;
         if (type === 'url') return location.href;
-        if (type === 'html') return el?.outerHTML || '';
-        return el?.innerText || '';
+        const raw = type === 'html' ? (el?.outerHTML || '') : (el?.innerText || '');
+        return raw.length > maxChars ? raw.slice(0, maxChars) + '\n[… truncated — result exceeded 50 000 char limit]' : raw;
       },
-      [{ type, selector, elementExpr: resolveElementScript(selector) }],
+      [{ type, selector, elementExpr: resolveElementScript(selector), maxChars: MAX_CHARS }],
     );
   },
   async evaluate({ script, tabId }) {
@@ -481,7 +492,16 @@ const toolHandlers = {
           title: document.title,
           inDescription: hasLabel('show transcript') || hasLabel('ask') || hasLabel('ask questions'),
           transcriptOpen: Boolean(document.querySelector('textarea[aria-label="Search transcript"], ytd-transcript-search-panel-renderer')),
-          askOpen: Boolean(document.body.innerText.includes('Ask about this video') || document.body.innerText.includes('Made with Gemini')),
+          askOpen: Boolean(
+            // Detect expanded Ask/Gemini engagement panel via DOM — avoids body.innerText scan
+            document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"][target-id*="clarify"]') ||
+            document.querySelector('#engagement-panel-clarify-box') ||
+            document.querySelector('ytd-clarify-box-renderer') ||
+            // Fallback: text probe limited to small known container, not full body
+            document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"]')
+              ?.querySelector?.('h2, [aria-label]')
+              ?.textContent?.toLowerCase()?.includes('ask'),
+          ),
           visibleButtons: candidates.filter((candidate) => candidate.text || candidate.ariaLabel).slice(0, 40),
         };
       },
@@ -492,7 +512,7 @@ const toolHandlers = {
     const resolvedTabId = await resolveTargetTabId(tabId);
     return await execInTab(
       resolvedTabId,
-      ({ panel, helperSelector }) => {
+      ({ panel, helperSelector, interactiveSelector }) => {
         const helpers = ({
           isVisible(el) {
             if (!(el instanceof Element)) return false;
@@ -537,12 +557,16 @@ const toolHandlers = {
         const targetLabels = panel === 'transcript'
           ? ['show transcript', 'transcript']
           : ['ask questions', 'ask'];
-        const candidates = [...document.querySelectorAll(helperSelector)]
-          .filter(helpers.isVisible)
-          .map((el) => ({ el, label: helpers.labelFor(el).toLowerCase() }))
-          .filter((candidate) => targetLabels.some((label) => candidate.label.includes(label)))
-          .sort((a, b) => a.el.getBoundingClientRect().y - b.el.getBoundingClientRect().y);
-        const target = candidates[0]?.el;
+        const findIn = (selector) =>
+          [...document.querySelectorAll(selector)]
+            .filter(helpers.isVisible)
+            .map((el) => ({ el, label: helpers.labelFor(el).toLowerCase() }))
+            .filter((candidate) => targetLabels.some((label) => candidate.label.includes(label)))
+            .sort((a, b) => a.el.getBoundingClientRect().y - b.el.getBoundingClientRect().y)[0];
+        // Try YouTube-specific selectors first, fall back to all interactive elements.
+        // YouTube's layout changes frequently; the broader selector catches relocated buttons.
+        const match = findIn(helperSelector) || findIn(interactiveSelector);
+        const target = match?.el;
         if (!target) throw new Error(`Could not find YouTube ${panel} control`);
         helpers.clickLikeHuman(target);
         return {
@@ -551,7 +575,7 @@ const toolHandlers = {
           text: helpers.labelFor(target).slice(0, 120),
         };
       },
-      [{ panel, helperSelector: YOUTUBE_HELPER_SELECTOR }],
+      [{ panel, helperSelector: YOUTUBE_HELPER_SELECTOR, interactiveSelector: INTERACTIVE_SELECTOR }],
     );
   },
   async youtubeTranscript({ tabId }) {
@@ -559,15 +583,36 @@ const toolHandlers = {
     return await execInTab(
       resolvedTabId,
       () => {
-        const transcriptRoot =
-          document.querySelector('ytd-transcript-segment-list-renderer') ||
-          document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"]') ||
-          document.body;
-        const transcriptText = transcriptRoot.innerText || '';
-        return {
-          ok: transcriptText.includes('Search transcript') || transcriptText.includes('Transcript'),
-          text: transcriptText,
-        };
+        // Prefer structured segment extraction (timestamped lines, bounded size)
+        const segmentList = document.querySelector('ytd-transcript-segment-list-renderer');
+        if (segmentList) {
+          const segments = [...segmentList.querySelectorAll('ytd-transcript-segment-renderer')];
+          if (segments.length > 0) {
+            const lines = segments.map((seg) => {
+              const ts = seg.querySelector('.segment-timestamp')?.textContent?.trim() || '';
+              const text = seg.querySelector('.segment-text')?.textContent?.trim() || '';
+              return ts ? `[${ts}] ${text}` : text;
+            }).filter(Boolean);
+            return { ok: true, text: lines.join('\n'), segments: lines.length };
+          }
+          // Panel exists but no segments yet — may still be loading
+          return { ok: false, text: '', segments: 0, hint: 'Transcript panel found but no segments — try again in 1-2 seconds.' };
+        }
+        // Fallback: check for an expanded engagement panel that looks like a transcript
+        const expandedPanel = document.querySelector(
+          'ytd-engagement-panel-section-list-renderer[visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"]',
+        );
+        if (expandedPanel) {
+          // Scoped innerText on a small panel element is safe — not body
+          const text = expandedPanel.innerText || '';
+          if (text.length > 200) return { ok: true, text, segments: null };
+        }
+        // No transcript panel found — fail explicitly. Returning document.body here would
+        // return 500KB+ of page garbage and may crash the extension messaging channel.
+        throw new Error(
+          'Transcript panel is not open. Run youtube-state to check transcriptOpen: true, ' +
+          'then use click-text "Show transcript" to open it before calling youtube-transcript.',
+        );
       },
       [],
     );
